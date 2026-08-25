@@ -119,7 +119,7 @@ Rules:
       throw new Error(`Planner ka JSON parse nahi hua: ${parseErr.message}`);
     }
     log.push({ step: "plan-parsed", fileList });
-    emit({ type: "planner-done", ok: true, model: plannerResult.model_used, files: fileList.map((f) => f.path) });
+    emit({ type: "planner-done", ok: true, model: plannerResult.model_used, files: fileList.map((f) => f.path), plan: fileList });
 
     // ---------- Sandbox banao (saari files isi mein banengi) ----------
     emit({ type: "sandbox-start" });
