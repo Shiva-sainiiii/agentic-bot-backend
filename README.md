@@ -7,7 +7,22 @@ Sirf API — koi frontend nahi. Frontend alag se Vercel pe deploy hoga
 
 - `GET  /health` — uptime-pinger ke liye
 - `POST /api/agent` — single-role test (Phase 1)
-- `POST /api/project` — poori multi-file pipeline (Phase 3, main feature)
+- `POST /api/project` — poori multi-file pipeline, ek shot mein poora result (Phase 3)
+- `POST /api/project/start` — job-based version, turant `jobId` deta hai (Phase 4, frontend isko use karta hai)
+- `GET  /api/project/status/:jobId?since=N` — job poll karo, naye events lo
+
+## Live code streaming (NEW)
+
+Coder aur Fixer roles ab OpenRouter se `stream: true` ke saath call hote hain.
+Har token chunk aate hi ek `code-chunk` event job ke event log mein push hota
+hai (`{ type: "code-chunk", file, delta, model }`). Frontend jab poll karta
+hai, ye chunks turant mil jaate hain — is tarah frontend real-time typing
+effect dikha sakta hai jaisa model actually likh raha hai, fake typewriter
+animation nahi.
+
+Agar ek model beech-stream fail ho jaaye aur fallback chain agle model pe
+jaaye, ek `code-chunk-reset` event bhejta hai taaki frontend purana partial
+text clear kar de aur naye model se fresh stream dikhaye.
 
 ## Deploy on Render
 

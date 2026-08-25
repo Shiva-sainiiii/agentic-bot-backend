@@ -149,10 +149,22 @@ Rules:
       const coderPrompt = `Project task: "${task}"\n\nAb likho: "${filePath}" — ${description}.${languageHint}${contextBlock}\n\nSirf is file ka code do, ek hi markdown code block me, koi extra explanation nahi.`;
 
       emit({ type: "coder-start", file: filePath });
-      const coderResult = await runAgent("coder", [{ role: "user", content: coderPrompt }]);
+      // Coder ko streaming mode me chalate hain — har token chunk aate hi
+      // "code-chunk" event emit hota hai taaki frontend live typing dikha sake.
+      const coderResult = await runAgent(
+        "coder",
+        [{ role: "user", content: coderPrompt }],
+        (delta, meta) => {
+          if (meta.reset) {
+            emit({ type: "code-chunk-reset", file: filePath, model: meta.model });
+          } else {
+            emit({ type: "code-chunk", file: filePath, delta, model: meta.model });
+          }
+        }
+      );
       let code = extractCode(coderResult.content);
       log.push({ step: "coder", file: filePath, model: coderResult.model_used, code });
-      emit({ type: "coder-done", file: filePath, model: coderResult.model_used });
+      emit({ type: "coder-done", file: filePath, model: coderResult.model_used, fullRaw: coderResult.content });
 
       await writeFile(sandbox, filePath, code);
       log.push({ step: "file-written", file: filePath });
@@ -169,12 +181,22 @@ Rules:
         while (!testResult.success && attempt < MAX_FIX_ATTEMPTS) {
           attempt++;
           emit({ type: "fixer-start", file: filePath, attempt, maxAttempts: MAX_FIX_ATTEMPTS });
-          const fixerResult = await runAgent("fixer", [
-            {
-              role: "user",
-              content: `Ye code fail ho raha hai (file: ${filePath}):\n\n\`\`\`\n${code}\n\`\`\`\n\nError:\n${testResult.stderr || testResult.stdout}\n\n${languageHint} Bug fix karke sirf corrected code do, ek hi markdown code block me.`,
-            },
-          ]);
+          const fixerResult = await runAgent(
+            "fixer",
+            [
+              {
+                role: "user",
+                content: `Ye code fail ho raha hai (file: ${filePath}):\n\n\`\`\`\n${code}\n\`\`\`\n\nError:\n${testResult.stderr || testResult.stdout}\n\n${languageHint} Bug fix karke sirf corrected code do, ek hi markdown code block me.`,
+              },
+            ],
+            (delta, meta) => {
+              if (meta.reset) {
+                emit({ type: "code-chunk-reset", file: filePath, model: meta.model });
+              } else {
+                emit({ type: "code-chunk", file: filePath, delta, model: meta.model });
+              }
+            }
+          );
           code = extractCode(fixerResult.content);
           log.push({ step: "fixer", file: filePath, model: fixerResult.model_used, attempt, code });
           emit({ type: "fixer-done", file: filePath, attempt, model: fixerResult.model_used });
