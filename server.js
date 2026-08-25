@@ -103,13 +103,17 @@ app.post("/api/project", async (req, res) => {
 // band ho jaayein to UI khud "stuck ho sakta hai" dikha sake.
 app.post("/api/project/stream", async (req, res) => {
   const { task } = req.body || {};
+  console.log(`[stream] Request aayi. task="${(task || "").slice(0, 80)}"`);
+
   if (!task) {
     return res.status(400).json({ error: "`task` chahiye body me" });
   }
   if (!process.env.OPENROUTER_API_KEY) {
+    console.error("[stream] OPENROUTER_API_KEY missing!");
     return res.status(500).json({ error: "OPENROUTER_API_KEY set nahi hai" });
   }
   if (!process.env.E2B_API_KEY) {
+    console.error("[stream] E2B_API_KEY missing!");
     return res.status(500).json({ error: "E2B_API_KEY set nahi hai" });
   }
 
@@ -134,16 +138,18 @@ app.post("/api/project/stream", async (req, res) => {
   let closed = false;
   req.on("close", () => {
     closed = true;
+    console.log("[stream] Client connection closed (abort ya complete).");
     clearInterval(pingInterval);
   });
 
   try {
     const result = await runProjectPipeline(task, (event) => {
+      console.log(`[stream] event: ${event.type}${event.file ? ` (${event.file})` : ""}`);
       if (!closed) send({ ...event, kind: "progress" });
     });
     if (!closed) send({ kind: "result", ...result });
   } catch (err) {
-    console.error("runProjectPipeline (stream) failed:", err);
+    console.error("[stream] runProjectPipeline (stream) failed:", err);
     if (!closed) send({ kind: "error", error: err.message || String(err) });
   } finally {
     clearInterval(pingInterval);
