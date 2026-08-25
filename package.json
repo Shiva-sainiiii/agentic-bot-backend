@@ -1,0 +1,17 @@
+{
+  "name": "agentic-bot-project",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-file agentic coding pipeline - Planner to Reporter, ek sandbox mein",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "e2b": "^1.4.0"
+  }
+}
