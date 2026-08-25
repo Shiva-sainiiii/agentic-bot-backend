@@ -97,64 +97,83 @@ app.post("/api/project", async (req, res) => {
   }
 });
 
-// Phase 4: streaming version of /api/project — same pipeline, lekin Server-Sent
-// Events se har step (planner/coder/test/fixer/reporter) live bhejta hai taaki
-// frontend dikha sake ki *kaunsa* step chal raha hai, aur agar events aana
-// band ho jaayein to UI khud "stuck ho sakta hai" dikha sake.
-app.post("/api/project/stream", async (req, res) => {
-  const { task } = req.body || {};
-  console.log(`[stream] Request aayi. task="${(task || "").slice(0, 80)}"`);
+// ---------- Phase 4: job-based polling (SSE ki jagah) ----------
+// Mobile browsers + free-tier proxies ke saath long-lived SSE connections
+// unreliably abort ho jaate hain (turant "connection closed" mil jaata hai
+// bina kisi wajah ke). Isliye simple polling model use karte hain: job start
+// karo (turant job id milega), phir har 2s pe GET se status poocho. Har poll
+// ek normal chhota HTTP request/response hai — koi streaming connection
+// zinda nahi rakhni padti, jo mobile Chrome + Render free tier pe zyada
+// reliable hai.
 
+const jobs = new Map(); // jobId -> { status, events, result, error, createdAt }
+const JOB_TTL_MS = 15 * 60 * 1000; // 15 min baad purane jobs cleanup ho jaayenge
+
+function cleanupOldJobs() {
+  const now = Date.now();
+  for (const [id, job] of jobs.entries()) {
+    if (now - job.createdAt > JOB_TTL_MS) jobs.delete(id);
+  }
+}
+
+function makeJobId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// Job start karo — turant jobId return karta hai, pipeline background mein chalti hai
+app.post("/api/project/start", (req, res) => {
+  const { task } = req.body || {};
   if (!task) {
     return res.status(400).json({ error: "`task` chahiye body me" });
   }
   if (!process.env.OPENROUTER_API_KEY) {
-    console.error("[stream] OPENROUTER_API_KEY missing!");
     return res.status(500).json({ error: "OPENROUTER_API_KEY set nahi hai" });
   }
   if (!process.env.E2B_API_KEY) {
-    console.error("[stream] E2B_API_KEY missing!");
     return res.status(500).json({ error: "E2B_API_KEY set nahi hai" });
   }
 
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-    // Nginx/proxy buffering ko disable karne ki koshish (Render/most proxies isko respect karte hain)
-    "X-Accel-Buffering": "no",
-  });
+  cleanupOldJobs();
 
-  const send = (obj) => {
-    res.write(`data: ${JSON.stringify(obj)}\n\n`);
-  };
+  const jobId = makeJobId();
+  const job = { status: "running", events: [], result: null, error: null, createdAt: Date.now() };
+  jobs.set(jobId, job);
 
-  // Proxy timeout se bachne ke liye periodic comment-ping (SSE keep-alive) —
-  // isse client-side connection "dead" nahi maani jaati lambe LLM calls ke beech.
-  const pingInterval = setInterval(() => {
-    res.write(`: ping\n\n`);
-  }, 15000);
+  console.log(`[job ${jobId}] Shuru hua. task="${task.slice(0, 80)}"`);
 
-  let closed = false;
-  req.on("close", () => {
-    closed = true;
-    console.log("[stream] Client connection closed (abort ya complete).");
-    clearInterval(pingInterval);
-  });
-
-  try {
-    const result = await runProjectPipeline(task, (event) => {
-      console.log(`[stream] event: ${event.type}${event.file ? ` (${event.file})` : ""}`);
-      if (!closed) send({ ...event, kind: "progress" });
+  runProjectPipeline(task, (event) => {
+    job.events.push({ ...event, ts: Date.now() });
+    console.log(`[job ${jobId}] event: ${event.type}${event.file ? ` (${event.file})` : ""}`);
+  })
+    .then((result) => {
+      job.status = "done";
+      job.result = result;
+      console.log(`[job ${jobId}] Poora hua. success=${result.success}`);
+    })
+    .catch((err) => {
+      job.status = "error";
+      job.error = err.message || String(err);
+      console.error(`[job ${jobId}] Fail hua:`, err);
     });
-    if (!closed) send({ kind: "result", ...result });
-  } catch (err) {
-    console.error("[stream] runProjectPipeline (stream) failed:", err);
-    if (!closed) send({ kind: "error", error: err.message || String(err) });
-  } finally {
-    clearInterval(pingInterval);
-    if (!closed) res.end();
+
+  res.json({ jobId });
+});
+
+// Job status poll karo — sirf naye events bhejta hai (client apna "seen so far" count bhejta hai)
+app.get("/api/project/status/:jobId", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: "Job nahi mila (expire ho gaya ya galat id)" });
   }
+  const since = parseInt(req.query.since, 10) || 0;
+  const newEvents = job.events.slice(since);
+  res.json({
+    status: job.status, // "running" | "done" | "error"
+    events: newEvents,
+    eventCount: job.events.length,
+    result: job.status === "done" ? job.result : null,
+    error: job.status === "error" ? job.error : null,
+  });
 });
 
 const PORT = process.env.PORT || 3000;
