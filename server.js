@@ -97,6 +97,60 @@ app.post("/api/project", async (req, res) => {
   }
 });
 
+// Phase 4: streaming version of /api/project — same pipeline, lekin Server-Sent
+// Events se har step (planner/coder/test/fixer/reporter) live bhejta hai taaki
+// frontend dikha sake ki *kaunsa* step chal raha hai, aur agar events aana
+// band ho jaayein to UI khud "stuck ho sakta hai" dikha sake.
+app.post("/api/project/stream", async (req, res) => {
+  const { task } = req.body || {};
+  if (!task) {
+    return res.status(400).json({ error: "`task` chahiye body me" });
+  }
+  if (!process.env.OPENROUTER_API_KEY) {
+    return res.status(500).json({ error: "OPENROUTER_API_KEY set nahi hai" });
+  }
+  if (!process.env.E2B_API_KEY) {
+    return res.status(500).json({ error: "E2B_API_KEY set nahi hai" });
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    // Nginx/proxy buffering ko disable karne ki koshish (Render/most proxies isko respect karte hain)
+    "X-Accel-Buffering": "no",
+  });
+
+  const send = (obj) => {
+    res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  };
+
+  // Proxy timeout se bachne ke liye periodic comment-ping (SSE keep-alive) —
+  // isse client-side connection "dead" nahi maani jaati lambe LLM calls ke beech.
+  const pingInterval = setInterval(() => {
+    res.write(`: ping\n\n`);
+  }, 15000);
+
+  let closed = false;
+  req.on("close", () => {
+    closed = true;
+    clearInterval(pingInterval);
+  });
+
+  try {
+    const result = await runProjectPipeline(task, (event) => {
+      if (!closed) send({ ...event, kind: "progress" });
+    });
+    if (!closed) send({ kind: "result", ...result });
+  } catch (err) {
+    console.error("runProjectPipeline (stream) failed:", err);
+    if (!closed) send({ kind: "error", error: err.message || String(err) });
+  } finally {
+    clearInterval(pingInterval);
+    if (!closed) res.end();
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Agentic bot server chal raha hai port ${PORT} par`);

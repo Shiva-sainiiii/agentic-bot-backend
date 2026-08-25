@@ -64,14 +64,33 @@ function extractFileList(text) {
  * multiple files ke liye, ek hi sandbox mein.
  *
  * @param {string} task - jo bhi banana hai, jaise "Simple todo app banao HTML/CSS/JS mein"
+ * @param {function} onEvent - optional callback(event) — live progress ke liye.
+ *   event shape: { type, ...details, ts }. type values:
+ *   "planner-start" | "planner-done" | "sandbox-start" | "sandbox-done" |
+ *   "file-start" | "coder-start" | "coder-done" | "test-start" | "test-done" |
+ *   "fixer-start" | "fixer-done" | "file-done" | "reporter-start" |
+ *   "reporter-done" | "pipeline-done" | "pipeline-error"
  * @returns {Promise<{success, files, log, report, plan}>}
  */
-async function runProjectPipeline(task) {
+async function runProjectPipeline(task, onEvent) {
   const log = [];
   let sandbox;
 
+  // onEvent optional hai — na diya ho to no-op, taaki purana caller (bina streaming)
+  // bina modification ke chalta rahe.
+  const emit = (event) => {
+    if (typeof onEvent === "function") {
+      try {
+        onEvent({ ...event, ts: Date.now() });
+      } catch (e) {
+        // listener ka apna error pipeline ko crash na kare
+      }
+    }
+  };
+
   try {
     // ---------- STEP 1: PLANNER ----------
+    emit({ type: "planner-start" });
     const plannerPrompt = `Task: "${task}"
 
 Is task ko poora karne ke liye files ki list banao. SIRF ek JSON array return karo, koi extra text nahi, is exact format mein:
@@ -96,21 +115,28 @@ Rules:
     try {
       fileList = extractFileList(plannerResult.content);
     } catch (parseErr) {
+      emit({ type: "planner-done", ok: false, error: parseErr.message });
       throw new Error(`Planner ka JSON parse nahi hua: ${parseErr.message}`);
     }
     log.push({ step: "plan-parsed", fileList });
+    emit({ type: "planner-done", ok: true, model: plannerResult.model_used, files: fileList.map((f) => f.path) });
 
     // ---------- Sandbox banao (saari files isi mein banengi) ----------
+    emit({ type: "sandbox-start" });
     sandbox = await createSandbox();
     log.push({ step: "sandbox-created" });
+    emit({ type: "sandbox-done" });
 
     const finishedFiles = []; // { path, code, success }
 
     // ---------- STEP 2: HAR FILE KE LIYE CODER -> TEST -> FIXER ----------
-    for (const fileSpec of fileList) {
+    for (let fileIndex = 0; fileIndex < fileList.length; fileIndex++) {
+      const fileSpec = fileList[fileIndex];
       const { path: filePath, description, runnable, runCmd } = fileSpec;
       const language = detectLanguage(filePath);
       const languageHint = language ? ` Language: ${language}.` : "";
+
+      emit({ type: "file-start", file: filePath, index: fileIndex, total: fileList.length });
 
       // Ab tak ki files ka context — taaki naya file unhe reference kar sake
       const contextLines = finishedFiles
@@ -122,9 +148,11 @@ Rules:
 
       const coderPrompt = `Project task: "${task}"\n\nAb likho: "${filePath}" — ${description}.${languageHint}${contextBlock}\n\nSirf is file ka code do, ek hi markdown code block me, koi extra explanation nahi.`;
 
+      emit({ type: "coder-start", file: filePath });
       const coderResult = await runAgent("coder", [{ role: "user", content: coderPrompt }]);
       let code = extractCode(coderResult.content);
       log.push({ step: "coder", file: filePath, model: coderResult.model_used, code });
+      emit({ type: "coder-done", file: filePath, model: coderResult.model_used });
 
       await writeFile(sandbox, filePath, code);
       log.push({ step: "file-written", file: filePath });
@@ -133,11 +161,14 @@ Rules:
 
       if (runnable && runCmd) {
         let attempt = 0;
+        emit({ type: "test-start", file: filePath, attempt });
         let testResult = await runCommand(sandbox, runCmd);
         log.push({ step: "test-run", file: filePath, attempt, ...testResult });
+        emit({ type: "test-done", file: filePath, attempt, ok: testResult.success });
 
         while (!testResult.success && attempt < MAX_FIX_ATTEMPTS) {
           attempt++;
+          emit({ type: "fixer-start", file: filePath, attempt, maxAttempts: MAX_FIX_ATTEMPTS });
           const fixerResult = await runAgent("fixer", [
             {
               role: "user",
@@ -146,15 +177,19 @@ Rules:
           ]);
           code = extractCode(fixerResult.content);
           log.push({ step: "fixer", file: filePath, model: fixerResult.model_used, attempt, code });
+          emit({ type: "fixer-done", file: filePath, attempt, model: fixerResult.model_used });
 
           await writeFile(sandbox, filePath, code);
+          emit({ type: "test-start", file: filePath, attempt });
           testResult = await runCommand(sandbox, runCmd);
           log.push({ step: "test-run", file: filePath, attempt, ...testResult });
+          emit({ type: "test-done", file: filePath, attempt, ok: testResult.success });
         }
         fileSuccess = testResult.success;
       }
 
       finishedFiles.push({ path: filePath, code, success: fileSuccess });
+      emit({ type: "file-done", file: filePath, index: fileIndex, total: fileList.length, ok: fileSuccess });
     }
 
     const overallSuccess = finishedFiles.every((f) => f.success);
@@ -164,6 +199,7 @@ Rules:
       .map((f) => `${f.path}: ${f.success ? "OK" : "FAILED"}`)
       .join(", ");
 
+    emit({ type: "reporter-start" });
     const reporterResult = await runAgent("reporter", [
       {
         role: "user",
@@ -172,14 +208,20 @@ Rules:
         }. Ek chhota 4-5 line summary do Hinglish me user ke liye — kya bana, kya kaam kar raha hai, agar kuch fail hua to kya.`,
       },
     ]);
+    emit({ type: "reporter-done", model: reporterResult.model_used });
 
-    return {
+    const finalResult = {
       success: overallSuccess,
       plan: fileList,
       files: finishedFiles,
       log,
       report: reporterResult.content,
     };
+    emit({ type: "pipeline-done", success: overallSuccess });
+    return finalResult;
+  } catch (err) {
+    emit({ type: "pipeline-error", error: err.message || String(err) });
+    throw err;
   } finally {
     if (sandbox) {
       await closeSandbox(sandbox);
