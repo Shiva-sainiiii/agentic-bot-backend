@@ -22,6 +22,12 @@ app.use((req, res, next) => {
   next();
 });
 
+// Root route — UptimeRobot jaise monitors default me "/" ko hi ping karte hain.
+// Isko na rakhne se wo 404 dikhata reh jaata, chahe server bilkul theek chal raha ho.
+app.get("/", (req, res) => {
+  res.json({ status: "ok", service: "agentic-bot-backend" });
+});
+
 // Health check — uptime-pinger (UptimeRobot/cron-job.org) isi ko hit karega
 // taaki Render free instance sleep na ho
 app.get("/health", (req, res) => {
